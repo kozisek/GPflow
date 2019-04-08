@@ -25,6 +25,8 @@ allows this to be done whilst additionally learning parameters of the
 parametric function.
 """
 
+from functools import reduce
+
 import tensorflow as tf
 import numpy as np
 
@@ -47,13 +49,14 @@ class MeanFunction(Parameterized):
     example.
     """
     def __call__(self, X):
-        raise NotImplementedError("Implement the __call__ method for this mean function")
+        raise NotImplementedError(
+            'Implement the __call__ method for this mean function')
 
     def __add__(self, other):
-        return Additive(self, other)
+        return Sum([self, other])
 
     def __mul__(self, other):
-        return Product(self, other)
+        return Product([self, other])
 
 
 class Linear(MeanFunction):
@@ -93,16 +96,18 @@ class Identity(Linear):
     @property
     def A(self):
         if self.input_dim is None:
-            raise ValueError("An input_dim needs to be specified when using the "
-                             "`Identity` mean function in combination with expectations.")
+            raise ValueError(
+                'An input_dim needs to be specified when using the '
+                '`Identity` mean function in combination with expectations.')
 
         return tf.eye(self.input_dim, dtype=settings.float_type)
 
     @property
     def b(self):
         if self.input_dim is None:
-            raise ValueError("An input_dim needs to be specified when using the "
-                             "`Identity` mean function in combination with expectations.")
+            raise ValueError(
+                'An input_dim needs to be specified when using the '
+                '`Identity` mean function in combination with expectations.')
 
         return tf.zeros(self.input_dim, dtype=settings.float_type)
 
@@ -158,33 +163,54 @@ class SwitchedMeanFunction(MeanFunction):
     def __call__(self, X):
         ind = tf.gather(tf.transpose(X), tf.shape(X)[1]-1)  # ind = X[:,-1]
         ind = tf.cast(ind, tf.int32)
-        X = tf.transpose(tf.gather(tf.transpose(X), tf.range(0, tf.shape(X)[1]-1)))  # X = X[:,:-1]
+        X = tf.transpose(tf.gather(
+            tf.transpose(X), tf.range(0, tf.shape(X)[1]-1)))  # X = X[:,:-1]
 
         # split up X into chunks corresponding to the relevant likelihoods
         x_list = tf.dynamic_partition(X, ind, len(self.meanfunction_list))
         # apply the likelihood-function to each section of the data
         results = [m(x) for x, m in zip(x_list, self.meanfunction_list)]
         # stitch the results back together
-        partitions = tf.dynamic_partition(tf.range(0, tf.size(ind)), ind, len(self.meanfunction_list))
+        partitions = tf.dynamic_partition(
+            tf.range(0, tf.size(ind)), ind, len(self.meanfunction_list))
         return tf.dynamic_stitch(partitions, results)
 
 
-class Additive(MeanFunction):
-    def __init__(self, first_part, second_part):
-        MeanFunction.__init__(self)
-        self.add_1 = first_part
-        self.add_2 = second_part
+class Combination(MeanFunction):
+    """
+    Combine a list of mean functions, e.g. by adding or multiplying
+    (see inheriting classes).
+    """
 
+    def __init__(self, mean_functions):
+        if not all(isinstance(m, MeanFunction) for m in mean_functions):
+            raise TypeError('Can only combine MeanFunction instances')
+        super().__init__(self)
+
+        # add mean functions to a list, flattening out instances of this class
+        mean_function_list = []
+        for m in mean_functions:
+            if isinstance(m, self.__class__):
+                mean_function_list.extend(m.mean_functions)
+            else:
+                mean_function_list.append(m)
+        self.mean_functions = ParamList(mean_function_list)
+
+
+class Sum(MeanFunction):
+    """
+    Add multiple mean functions
+    """
     def __call__(self, X):
-        return tf.add(self.add_1(X), self.add_2(X))
+        return reduce(tf.add, [m(X) for m in self.mean_functions])
+
+
+Additive = Sum  # for compatibility reasons
 
 
 class Product(MeanFunction):
-    def __init__(self, first_part, second_part):
-        MeanFunction.__init__(self)
-
-        self.prod_1 = first_part
-        self.prod_2 = second_part
-
+    """
+    Multiply multiple mean functions
+    """
     def __call__(self, X):
-        return tf.multiply(self.prod_1(X), self.prod_2(X))
+        return reduce(tf.multiply, [m(X) for m in self.mean_functions])
